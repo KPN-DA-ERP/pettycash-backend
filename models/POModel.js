@@ -12,12 +12,37 @@ const Emailer = require("../service/mail");
 
 const postPO = async (payload, itemPayload) => {
   const client = await db.connect();
+
   try {
     await client.query(TRANS.BEGIN);
 
+    // Ambil id_user Super Admin
+    const adminResult = await client.query(
+      `
+        SELECT id_user
+        FROM mst_user
+        WHERE name = $1
+        LIMIT 1
+      `,
+      ["Super Admin"],
+    );
+
+    if (adminResult.rows.length === 0) {
+      throw new Error("User Super Admin tidak ditemukan");
+    }
+
+    const approval_by = adminResult.rows[0].id_user;
+
     // PO
-    const [query, value] = insertQuery("purchase_order", payload, "id_po");
-    console.log(query);
+    const poPayload = {
+      ...payload,
+      status: "approved",
+      approval_by,
+      approval_date: new Date(),
+    };
+
+    const [query, value] = insertQuery("purchase_order", poPayload, "id_po");
+
     const result = await client.query(query, value);
     const id_po = result.rows[0].id_po;
 
@@ -25,17 +50,22 @@ const postPO = async (payload, itemPayload) => {
     itemPayload = itemPayload.map((item) => ({
       ...item,
       id_po_item: uuidv4(),
-      id_po: id_po,
+      id_po,
     }));
-    const [itemQuery, itemValue] = insertQuery("purchase_order_item", itemPayload);
-    console.log(itemQuery, itemPayload);
-    const itemResult = await client.query(itemQuery, itemValue);
 
+    const [itemQuery, itemValue] = insertQuery(
+      "purchase_order_item",
+      itemPayload,
+    );
+
+    await client.query(itemQuery, itemValue);
+
+    // Email
     const Email = new Emailer();
-    const emailResult = await Email.newPO(id_po);
-    console.log(emailResult);
+    await Email.newPO(id_po);
 
     await client.query(TRANS.COMMIT);
+
     return id_po;
   } catch (error) {
     console.log(error);
@@ -48,19 +78,23 @@ const postPO = async (payload, itemPayload) => {
 
 const getPOByUser = async (id_user, status, is_complete) => {
   const client = await db.connect();
+
   try {
     await client.query(TRANS.BEGIN);
+
     const result = await client.query(
       `
       SELECT 
         po.id_po,
         po.po_date,
-        (SUM(poi.unit_price * poi.qty) - po.discount) *
+        (
+          (SUM(poi.unit_price * poi.qty) - po.discount) *
           CASE
+            WHEN po.ppn = 0.10 THEN 1.10
             WHEN po.ppn = 0.11 THEN 1.11
             ELSE 1.0
           END
-        AS grand_total,
+        ) AS grand_total,
         po.status,
         po.is_complete,
         EXISTS (
@@ -71,18 +105,31 @@ const getPOByUser = async (id_user, status, is_complete) => {
         c.company_name,
         v.vendor_name
       FROM purchase_order po
-      JOIN mst_company c ON po.id_company = c.id_company
-      JOIN mst_vendor v ON po.id_vendor = v.id_vendor
-      LEFT JOIN purchase_order_item poi ON po.id_po = poi.id_po
+      JOIN mst_company c 
+        ON po.id_company = c.id_company
+      JOIN mst_vendor v 
+        ON po.id_vendor = v.id_vendor
+      LEFT JOIN purchase_order_item poi 
+        ON po.id_po = poi.id_po
       WHERE po.id_user = $1
-      AND (po.status = $2 OR $2::VARCHAR IS NULL)
-      AND (po.is_complete = $3 OR $3::VARCHAR IS NULL)
-      GROUP BY po.id_po, c.company_name, v.vendor_name
-      ORDER BY po_date DESC
+        AND (po.status = $2 OR $2::VARCHAR IS NULL)
+        AND (po.is_complete = $3 OR $3::VARCHAR IS NULL)
+      GROUP BY
+        po.id_po,
+        c.company_name,
+        v.vendor_name
+      ORDER BY
+        CASE
+          WHEN po.status = 'pending' THEN 0
+          ELSE 1
+        END,
+        po.po_date DESC
       `,
-      [id_user, status, is_complete]
+      [id_user, status, is_complete],
     );
+
     await client.query(TRANS.COMMIT);
+
     return result.rows;
   } catch (error) {
     console.log(error);
@@ -92,7 +139,6 @@ const getPOByUser = async (id_user, status, is_complete) => {
     client.release();
   }
 };
-
 const getPOById = async (id_po) => {
   const client = await db.connect();
   try {
@@ -104,7 +150,8 @@ const getPOById = async (id_po) => {
       SUM(poi.unit_price * poi.qty) AS sub_total,
       (SUM(poi.unit_price * poi.qty) - po.discount) *
         CASE
-          WHEN po.ppn = 0.11 THEN 1.11
+            WHEN po.ppn = 0.10 THEN 1.10
+            WHEN po.ppn = 0.11 THEN 1.11
           ELSE 1.0
         END
       AS grand_total
@@ -114,18 +161,23 @@ const getPOById = async (id_po) => {
       WHERE po.id_po = $1
       GROUP BY po.id_po, u.name
       `,
-      [id_po]
+      [id_po],
     );
 
     if (result.rows.length === 0) {
       throw new Error("PO not found");
     }
 
-    const [companyResult, vendorResult, itemResult, has_gr] = await Promise.all([
-      client.query(`SELECT * FROM mst_company WHERE id_company = $1`, [result.rows[0].id_company]),
-      client.query(`SELECT * FROM mst_vendor WHERE id_vendor = $1`, [result.rows[0].id_vendor]),
-      client.query(
-        `
+    const [companyResult, vendorResult, itemResult, has_gr] = await Promise.all(
+      [
+        client.query(`SELECT * FROM mst_company WHERE id_company = $1`, [
+          result.rows[0].id_company,
+        ]),
+        client.query(`SELECT * FROM mst_vendor WHERE id_vendor = $1`, [
+          result.rows[0].id_vendor,
+        ]),
+        client.query(
+          `
         SELECT
           poi.*,
           (poi.unit_price * poi.qty) AS amount,
@@ -139,15 +191,16 @@ const getPOById = async (id_po) => {
           poi.id_po_item, poi.qty
         ORDER BY poi.description ASC
           `,
-        [id_po]
-      ),
-      client.query(
-        `
+          [id_po],
+        ),
+        client.query(
+          `
         SELECT id_gr FROM goods_receipt WHERE id_po = $1
         `,
-        [id_po]
-      ),
-    ]);
+          [id_po],
+        ),
+      ],
+    );
 
     await client.query(TRANS.COMMIT);
 
@@ -174,18 +227,20 @@ const getAllPO = async (reqCancel) => {
   try {
     await client.query(TRANS.BEGIN);
     const [status, data] = await Promise.all([
-      await client.query(reusableQuery.poStatus),
-      await client.query(
+      client.query(reusableQuery.poStatus),
+      client.query(
         `
         SELECT 
           po.id_po,
           po.po_date,
-          (SUM(poi.unit_price * poi.qty) - po.discount) *
+          (
+            (SUM(poi.unit_price * poi.qty) - po.discount) *
             CASE
+              WHEN po.ppn = 0.10 THEN 1.10
               WHEN po.ppn = 0.11 THEN 1.11
               ELSE 1.0
             END
-          AS grand_total,
+          ) AS grand_total,
           po.status,
           po.is_complete,
           EXISTS (
@@ -198,15 +253,34 @@ const getAllPO = async (reqCancel) => {
           v.vendor_name,
           u.name AS user_name
         FROM purchase_order po
-        JOIN mst_company c ON po.id_company = c.id_company
-        JOIN mst_vendor v ON po.id_vendor = v.id_vendor
-        JOIN mst_user u ON po.id_user = u.id_user
-        JOIN purchase_order_item poi on po.id_po = poi.id_po
-        WHERE (po.cancel_reason IS NOT NULL AND po.cancel_reason <> '' OR NOT $1)
-        GROUP BY po.id_po, c.company_name, v.vendor_name, u.name
-        ORDER BY po_date DESC
+        JOIN mst_company c
+          ON po.id_company = c.id_company
+        JOIN mst_vendor v
+          ON po.id_vendor = v.id_vendor
+        JOIN mst_user u
+          ON po.id_user = u.id_user
+        JOIN purchase_order_item poi
+          ON po.id_po = poi.id_po
+        WHERE (
+          (
+            po.cancel_reason IS NOT NULL
+            AND po.cancel_reason <> ''
+          )
+          OR NOT $1
+        )
+        GROUP BY
+          po.id_po,
+          c.company_name,
+          v.vendor_name,
+          u.name
+        ORDER BY
+          CASE
+            WHEN po.status = 'pending' THEN 0
+            ELSE 1
+          END,
+          po.po_date DESC
         `,
-        [reqCancel]
+        [reqCancel],
       ),
     ]);
     await client.query(TRANS.COMMIT);
@@ -232,9 +306,11 @@ const POApproval = async (payload, id_po) => {
           `UPDATE purchase_order
           SET status = $1, approval_by = $2, approval_date = $3
           WHERE id_po = $4`,
-          [payload.status, payload.id_user, payload.approval_date, id_po]
+          [payload.status, payload.id_user, payload.approval_date, id_po],
         ),
-        client.query(`SELECT name, email FROM mst_user WHERE id_user = $1`, [payload.id_user]),
+        client.query(`SELECT name, email FROM mst_user WHERE id_user = $1`, [
+          payload.id_user,
+        ]),
       ]);
       result = update;
       const emailResult = await Email.POApproved(id_po, user.rows[0]);
@@ -245,12 +321,24 @@ const POApproval = async (payload, id_po) => {
           `UPDATE purchase_order
           SET status = $1, approval_by = $2, approval_date = $3, reject_notes = $4
           WHERE id_po = $5`,
-          [payload.status, payload.id_user, payload.approval_date, payload.reject_notes, id_po]
+          [
+            payload.status,
+            payload.id_user,
+            payload.approval_date,
+            payload.reject_notes,
+            id_po,
+          ],
         ),
-        client.query(`SELECT name, email FROM mst_user WHERE id_user = $1`, [payload.id_user]),
+        client.query(`SELECT name, email FROM mst_user WHERE id_user = $1`, [
+          payload.id_user,
+        ]),
       ]);
       result = update;
-      const emailResult = await Email.PORejected(id_po, user.rows[0], payload.reject_notes);
+      const emailResult = await Email.PORejected(
+        id_po,
+        user.rows[0],
+        payload.reject_notes,
+      );
       console.log(emailResult);
     }
 
@@ -272,14 +360,15 @@ const updatePOCompletion = async (client, id_po) => {
       `
       SELECT id_po_item, is_complete FROM purchase_order_item WHERE id_po = $1 AND is_complete <> true
     `,
-      [id_po]
+      [id_po],
     );
     const allItemComplete = result.rows.length === 0;
     let update = "tes";
     if (allItemComplete) {
-      update = await client.query(`UPDATE purchase_order SET is_complete = true WHERE id_po = $1`, [
-        id_po,
-      ]);
+      update = await client.query(
+        `UPDATE purchase_order SET is_complete = true WHERE id_po = $1`,
+        [id_po],
+      );
     }
     console.log(update);
     return update.rows;
@@ -312,14 +401,17 @@ const reqCancelPO = async (reason, id_po) => {
         (SELECT name FROM user_info) AS user_name
       FROM updated_po;
       `,
-      [reason, id_po]
+      [reason, id_po],
     );
     console.log(result.rows);
     if (parseInt(result.rows[0].gr_count) !== 0)
       throw new Error("Cannot cancel PO with existing GR");
     if (result.rows.length === 0) throw new Error("ID PO not found");
 
-    const emailResult = await Email.newPOCancelReq(id_po, result.rows[0].user_name);
+    const emailResult = await Email.newPOCancelReq(
+      id_po,
+      result.rows[0].user_name,
+    );
     console.log(emailResult);
 
     await client.query(TRANS.COMMIT);
@@ -346,12 +438,12 @@ const cancelPO = async (approval, notes, id_po) => {
           `UPDATE purchase_order
               SET status = 'canceled', approval_by = null, approval_date = null, cancel_reason = null
               WHERE id_po = $1`,
-          [id_po]
+          [id_po],
         ),
         client.query(
           `
           SELECT u.name, u.email FROM purchase_order po JOIN mst_user u ON po.id_user = u.id_user WHERE id_po = $1`,
-          [id_po]
+          [id_po],
         ),
       ]);
       result = update;
@@ -364,16 +456,20 @@ const cancelPO = async (approval, notes, id_po) => {
           `UPDATE purchase_order
               SET cancel_reason = null
               WHERE id_po = $1`,
-          [id_po]
+          [id_po],
         ),
         client.query(
           `
           SELECT u.name, u.email FROM purchase_order po JOIN mst_user u ON po.id_user = u.id_user WHERE id_po = $1`,
-          [id_po]
+          [id_po],
         ),
       ]);
       result = update;
-      const emailResult = await Email.POCancelReqRejected(id_po, user.rows[0], notes);
+      const emailResult = await Email.POCancelReqRejected(
+        id_po,
+        user.rows[0],
+        notes,
+      );
       console.log(emailResult);
     }
 
@@ -389,7 +485,13 @@ const cancelPO = async (approval, notes, id_po) => {
   }
 };
 
-const editPO = async (payload, added_items, edited_items, deleted_items, id_po) => {
+const editPO = async (
+  payload,
+  added_items,
+  edited_items,
+  deleted_items,
+  id_po,
+) => {
   const client = await db.connect();
   try {
     await client.query(TRANS.BEGIN);
@@ -397,7 +499,7 @@ const editPO = async (payload, added_items, edited_items, deleted_items, id_po) 
       "purchase_order",
       payload,
       { id_po: id_po },
-      "id_po"
+      "id_po",
     );
     console.log(updatePOQuery, updatePOValue);
 
@@ -405,7 +507,7 @@ const editPO = async (payload, added_items, edited_items, deleted_items, id_po) 
     const [insertItemQuery, insertItemValue] = insertQuery(
       "purchase_order_item",
       added_items,
-      "id_po_item"
+      "id_po_item",
     );
     console.log(insertItemQuery, insertItemValue);
 
@@ -422,7 +524,9 @@ const editPO = async (payload, added_items, edited_items, deleted_items, id_po) 
     // EXECUTE ALL QUERY PARALLEL
     const [updatePO, insertItem, editItem, deleteItem] = await Promise.all([
       client.query(updatePOQuery, updatePOValue),
-      added_items.length !== 0 ? client.query(insertItemQuery, insertItemValue) : null,
+      added_items.length !== 0
+        ? client.query(insertItemQuery, insertItemValue)
+        : null,
       edited_items.length !== 0 ? client.query(editQuery) : null,
       deleted_items.length !== 0 ? client.query(deleteItemQuery) : null,
     ]);

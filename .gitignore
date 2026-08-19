@@ -4,3 +4,7 @@ node_modules
 .env.wb
 production.env
 development.env
+.env
+*.env
+uploads
+uploads/*

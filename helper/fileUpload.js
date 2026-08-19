@@ -8,8 +8,8 @@ const parseFormUpload = async (formData, options = {}) => {
       ? path.join(__dirname, `../uploads${options.uploadDir}`)
       : path.join(__dirname, "../uploads"),
     keepExtensions: true,
-    maxFileSize: options.maxFileSize || 10 * 1024 * 1024, // 10 MB by default
-    multiples: options.multiples || false,
+    maxFileSize: options.maxFileSize || 10 * 1024 * 1024,
+    multiples: true,
   });
 
   try {
@@ -18,32 +18,65 @@ const parseFormUpload = async (formData, options = {}) => {
         if (error) {
           return reject(error);
         }
+
         resolve({ fields, files });
       });
     });
 
     const payload = JSON.parse(fields.data);
-    const file = files.file;
 
-    if (!file) {
-      throw new Error("No file uploaded");
+    let uploadedFiles = files.files || [];
+
+    if (!Array.isArray(uploadedFiles)) {
+      uploadedFiles = [uploadedFiles];
     }
 
-    // Rename the file: timestamp_originalFilename.ext
-    // const oldFilePath = file[0].filepath;
-    // const originalFilename = file[0].originalFilename;
-    // const newFilename = `${Date.now()}_${originalFilename}`;
-    // const newFilePath = path.join(form.uploadDir, newFilename);
+    if (uploadedFiles.length === 0) {
+      throw new Error("No invoice file uploaded");
+    }
 
-    // Rename the file: timestamp_invoice_num.ext
-    const oldFilePath = file[0].filepath;
-    const extension = path.extname(file[0].originalFilename);
-    const newFilename = `${Date.now()}_${payload.invoice_num}${extension}`;
-    const newFilePath = path.join(form.uploadDir, newFilename);
+    // Pisahkan nomor invoice berdasarkan "/"
+    const invoiceNumbers = String(payload.invoice_num || "")
+      .split("/")
+      .map((value) => value.trim())
+      .filter(Boolean);
 
-    await fs.promises.rename(oldFilePath, newFilePath);
+    if (invoiceNumbers.length !== uploadedFiles.length) {
+      throw new Error(
+        `Jumlah invoice (${invoiceNumbers.length}) harus sama dengan jumlah file (${uploadedFiles.length})`,
+      );
+    }
 
-    return { payload, filename: newFilename };
+    const invoiceFiles = [];
+
+    for (let i = 0; i < uploadedFiles.length; i++) {
+      const file = uploadedFiles[i];
+
+      const invoiceNum = invoiceNumbers[i];
+
+      // Invoice number boleh menggunakan "/",
+      // tetapi "/" tidak boleh masuk ke nama file.
+      const safeInvoiceNum = invoiceNum
+        .replace(/[\\/:*?"<>|]/g, "-")
+        .replace(/\s+/g, "_");
+
+      const extension = path.extname(file.originalFilename);
+
+      const newFilename = `${Date.now()}_${safeInvoiceNum}_${Math.random()
+        .toString(36)
+        .substring(2, 8)}${extension}`;
+
+      const newFilePath = path.join(form.uploadDir, newFilename);
+
+      await fs.promises.rename(file.filepath, newFilePath);
+
+      invoiceFiles.push(newFilename);
+    }
+
+    return {
+      payload,
+      invoiceFiles,
+    };
   } catch (error) {
     console.error(error);
     throw error;

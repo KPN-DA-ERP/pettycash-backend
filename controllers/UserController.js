@@ -17,9 +17,19 @@ const handleLoginUser = async (req, res) => {
   const password = req.body.password;
 
   try {
-    const { data, accessToken } = await loginUser(emailOrUname, password);
+    const { data, accessToken, refreshToken } = await loginUser(
+      emailOrUname,
+      password,
+    );
 
-    res.status(200).send({
+    res.cookie("refresh_token", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+    });
+
+    return res.status(200).send({
       message: `Success sign in, welcome ${data.name}`,
       data: {
         name: data.name,
@@ -31,10 +41,18 @@ const handleLoginUser = async (req, res) => {
       },
     });
   } catch (error) {
-    if (error.message === "Invalid Password" || error.message === "User Not Found") {
-      return res.status(400).send({ message: error.message });
+    if (
+      error.message === "Invalid Password" ||
+      error.message === "User Not Found"
+    ) {
+      return res.status(400).send({
+        message: error.message,
+      });
     }
-    res.status(500).send({ message: error.message });
+
+    return res.status(500).send({
+      message: error.message,
+    });
   }
 };
 
@@ -175,29 +193,39 @@ const handleResetPassword = async (req, res) => {
 };
 
 const refreshAccessToken = async (req, res) => {
-  const authHeaders = req.headers.Authorization || req.headers.authorization;
-  if (!authHeaders) {
-    res.status(403).send({
-      message: "Access Denied",
+  const refreshToken = req.cookies?.refresh_token;
+
+  if (!refreshToken) {
+    return res.status(403).send({
+      message: "Refresh token not found",
     });
   }
 
-  const payload = {
-    id_user: req.body.id_user,
-    username: req.body.username,
-    name: req.body.name,
-    email: req.body.email,
-  };
-
   try {
-    const token = await getNewToken(payload);
+    const token = await getNewToken(refreshToken);
+
     return res.status(200).send({
       access_token: token,
     });
   } catch (error) {
+    console.error(error);
+
     if (error.name === "TokenExpiredError") {
-      return res.status(403).send({ message: "Refresh Token Expired. Logging out." });
+      res.clearCookie("refresh_token");
+
+      return res.status(403).send({
+        message: "Refresh Token Expired. Logging out.",
+      });
     }
+
+    if (error.name === "JsonWebTokenError") {
+      res.clearCookie("refresh_token");
+
+      return res.status(403).send({
+        message: "Invalid Refresh Token",
+      });
+    }
+
     return res.status(500).send({
       message: error.message,
     });

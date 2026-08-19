@@ -3,67 +3,72 @@ const TRANS = require("../config/transaction");
 const { createOTP, validateOTP, validateToken } = require("../helper/auth/OTP");
 const { validatePassword, hashPassword } = require("../helper/auth/password");
 const { accessExpiry, refreshExpiry } = require("../helper/constant");
-const { insertQuery, deleteQuery, updateQuery } = require("../helper/queryBuilder");
+const {
+  insertQuery,
+  deleteQuery,
+  updateQuery,
+} = require("../helper/queryBuilder");
 const Emailer = require("../service/mail");
 const jwt = require("jsonwebtoken");
 
 const loginUser = async (emailOrUname, password) => {
   const client = await db.connect();
+
   try {
     await client.query(TRANS.BEGIN);
 
     const checkUserData = await client.query(
-      "SELECT * FROM mst_user WHERE username = $1 OR email = $2",
-      [emailOrUname, emailOrUname]
+      `
+      SELECT *
+      FROM mst_user
+      WHERE username = $1 OR email = $2
+      `,
+      [emailOrUname, emailOrUname],
     );
+
     if (checkUserData.rows.length === 0) {
       throw new Error("User Not Found");
     }
 
     const data = checkUserData.rows[0];
 
-    const accessToken = jwt.sign(
-      {
-        email: data.email,
-        username: data.username,
-        name: data.name,
-        id_user: data.id_user,
-        id_role: data.id_role,
-      },
-      process.env.SECRETJWT,
-      { expiresIn: accessExpiry }
-    );
+    const valid = await validatePassword(password, data.password);
 
-    const refreshToken = jwt.sign(
-      {
-        email: data.email,
-        username: data.username,
-        name: data.name,
-        id_user: data.id_user,
-        id_role: data.id_role,
-      },
-      process.env.SECRETJWT,
-      { expiresIn: refreshExpiry }
-    );
+    if (!valid) {
+      throw new Error("Invalid Password");
+    }
 
-    const [insertToken, valueToken] = updateQuery(
+    const tokenPayload = {
+      email: data.email,
+      username: data.username,
+      name: data.name,
+      id_user: data.id_user,
+      id_role: data.id_role,
+    };
+
+    const accessToken = jwt.sign(tokenPayload, process.env.SECRETJWT, {
+      expiresIn: accessExpiry,
+    });
+
+    const refreshToken = jwt.sign(tokenPayload, process.env.SECRETJWT, {
+      expiresIn: refreshExpiry,
+    });
+
+    const [updateTokenQuery, updateTokenValues] = updateQuery(
       "mst_user",
       { refresh_token: refreshToken },
-      { id_user: data.id_user }
+      { id_user: data.id_user },
     );
-    await client.query(insertToken, valueToken);
 
-    if (data) {
-      const valid = await validatePassword(password, data.password);
-      if (!valid) {
-        throw new Error("Invalid Password");
-      } else {
-        await client.query(TRANS.COMMIT);
-        return { data, accessToken };
-      }
-    } else {
-      throw new Error("User Not Found");
-    }
+    await client.query(updateTokenQuery, updateTokenValues);
+
+    await client.query(TRANS.COMMIT);
+
+    return {
+      data,
+      accessToken,
+      refreshToken,
+    };
   } catch (error) {
     await client.query(TRANS.ROLLBACK);
     console.error(error);
@@ -81,7 +86,7 @@ const registerUser = async (payload, role) => {
     // Check if user exist
     const checkUserExist = await client.query(
       "SELECT * FROM mst_user WHERE username = $1 OR email = $2",
-      [payload.username, payload.email]
+      [payload.username, payload.email],
     );
     if (checkUserExist.rows.length > 0) {
       throw new Error("User already exist");
@@ -90,7 +95,7 @@ const registerUser = async (payload, role) => {
     // Check if user registered
     const checkUserTemp = await client.query(
       "SELECT * FROM mst_user_temp WHERE username = $1 OR email = $2",
-      [payload.username, payload.email]
+      [payload.username, payload.email],
     );
     if (!checkUserTemp.rows.length > 0) {
       const [tempQuery, tempValue] = insertQuery("mst_user_temp", payload);
@@ -106,7 +111,9 @@ const registerUser = async (payload, role) => {
       otp_code: otpHashed,
       valid_until: null,
     };
-    const [cleanQuery, cleanValue] = deleteQuery("otp_trans", { email: payload.email });
+    const [cleanQuery, cleanValue] = deleteQuery("otp_trans", {
+      email: payload.email,
+    });
     const [OTPQuery, OTPValue] = insertQuery("otp_trans", payloadOtp);
     await client.query(cleanQuery, cleanValue);
     await client.query(OTPQuery, OTPValue);
@@ -138,9 +145,10 @@ const verifyUser = async (id_user, verify, token) => {
   try {
     await client.query(TRANS.BEGIN);
 
-    const tempUser = await client.query("SELECT * FROM mst_user_temp where id_user = $1", [
-      id_user,
-    ]);
+    const tempUser = await client.query(
+      "SELECT * FROM mst_user_temp where id_user = $1",
+      [id_user],
+    );
     const userData = tempUser.rows[0];
     if (!userData) throw new Error("User not found or already verified");
     delete userData.id;
@@ -149,17 +157,23 @@ const verifyUser = async (id_user, verify, token) => {
 
     if (verify) {
       const [insertUser, userValue] = insertQuery("mst_user", userData);
-      const [cleanQuery, cleanValue] = deleteQuery("mst_user_temp", { id_user: id_user });
+      const [cleanQuery, cleanValue] = deleteQuery("mst_user_temp", {
+        id_user: id_user,
+      });
       const [insert, clean] = await Promise.all([
         client.query(insertUser, userValue),
         client.query(cleanQuery, cleanValue),
       ]);
     } else {
-      const [cleanQuery, cleanValue] = deleteQuery("mst_user_temp", { id_user: id_user });
+      const [cleanQuery, cleanValue] = deleteQuery("mst_user_temp", {
+        id_user: id_user,
+      });
       const clean = await client.query(cleanQuery, cleanValue);
     }
 
-    const [cleanOtp, otpValue] = deleteQuery("otp_trans", { email: userData.email });
+    const [cleanOtp, otpValue] = deleteQuery("otp_trans", {
+      email: userData.email,
+    });
     await client.query(cleanOtp, otpValue);
 
     // Email to user
@@ -181,7 +195,10 @@ const reqResetPassword = async (email) => {
   const client = await db.connect();
   try {
     await client.query(TRANS.BEGIN);
-    const checkRegis = await client.query("SELECT * FROM mst_user where email = $1", [email]);
+    const checkRegis = await client.query(
+      "SELECT * FROM mst_user where email = $1",
+      [email],
+    );
     if (checkRegis.rows.length === 0) {
       throw new Error("User not registered yet");
     }
@@ -212,7 +229,10 @@ const resetPassword = async (newPass, email) => {
   const client = await db.connect();
   try {
     await client.query(TRANS.BEGIN);
-    const checkUser = await client.query("SELECT * FROM mst_user WHERE email = $1", [email]);
+    const checkUser = await client.query(
+      "SELECT * FROM mst_user WHERE email = $1",
+      [email],
+    );
     if (checkUser.rows.length == 0) {
       throw new Error("User not found");
     }
@@ -224,7 +244,7 @@ const resetPassword = async (newPass, email) => {
       "mst_user",
       payload,
       { email: email },
-      "username"
+      "username",
     );
     const updatePass = await client.query(updatePassQuery, updatePassValue);
     await client.query(TRANS.COMMIT);
@@ -237,42 +257,55 @@ const resetPassword = async (newPass, email) => {
   }
 };
 
-const getNewToken = async (data) => {
-  const client = await db.connect();
-  try {
-    await client.query(TRANS.BEGIN);
-    const result = await client.query(
-      `
-      SELECT refresh_token FROM mst_user WHERE id_user = $1
-      `,
-      [data.id_user]
-    );
-    const refreshToken = result.rows[0].refresh_token;
+const getNewToken = async (refreshToken) => {
+  const decoded = jwt.verify(refreshToken, process.env.SECRETJWT);
 
-    jwt.verify(refreshToken, process.env.SECRETJWT);
-    // If error, error.name === "TokenExpiredError"
-
-    const newToken = jwt.sign(
-      {
-        email: data.email,
-        username: data.username,
-        name: data.name,
-        id_user: data.id_user,
-        id_role: data.id_role,
-      },
-      process.env.SECRETJWT,
-      { expiresIn: accessExpiry }
-    );
-
-    await client.query(TRANS.COMMIT);
-    return newToken;
-  } catch (error) {
-    await client.query(TRANS.ROLLBACK);
-    console.error(error);
-    throw error;
-  } finally {
-    client.release();
+  if (!decoded.id_user) {
+    throw new Error("Invalid refresh token: id_user not found");
   }
+
+  const result = await db.query(
+    `
+    SELECT
+      id_user,
+      email,
+      username,
+      name,
+      id_role,
+      refresh_token
+    FROM mst_user
+    WHERE id_user = $1
+    `,
+    [decoded.id_user],
+  );
+
+  if (result.rows.length === 0) {
+    throw new Error(`User dengan id_user ${decoded.id_user} tidak ditemukan`);
+  }
+
+  const user = result.rows[0];
+
+  if (!user.refresh_token) {
+    throw new Error("Refresh token tidak tersedia");
+  }
+
+  if (user.refresh_token !== refreshToken) {
+    throw new Error("Invalid refresh token");
+  }
+
+  return jwt.sign(
+    {
+      email: user.email,
+      username: user.username,
+      name: user.name,
+      id_user: user.id_user,
+      id_role: user.id_role,
+    },
+    process.env.SECRETJWT,
+    {
+      expiresIn: accessExpiry,
+    },
+  );
 };
 
 module.exports = {
