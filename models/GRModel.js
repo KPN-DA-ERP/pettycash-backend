@@ -338,9 +338,9 @@ const getAllGR = async ({
           `
             SELECT
               ${businessUnitCase} AS business_unit,
-
+        
               COUNT(DISTINCT gr.id_gr) AS total_transaction,
-
+        
               COALESCE(
                 SUM(
                   (
@@ -355,15 +355,15 @@ const getAllGR = async ({
                 ),
                 0
               ) AS total_amount
-
+        
             FROM goods_receipt gr
-
+        
             JOIN purchase_order po
               ON gr.id_po = po.id_po
-
+        
             JOIN mst_company c
               ON po.id_company = c.id_company
-
+        
             JOIN (
               SELECT
                 gri.id_gr,
@@ -372,11 +372,12 @@ const getAllGR = async ({
               GROUP BY gri.id_gr
             ) item
               ON gr.id_gr = item.id_gr
-
+        
             ${whereClause}
-
+            ${whereClause ? "AND" : "WHERE"} gr.status = 'approved'
+        
             GROUP BY ${businessUnitCase}
-
+        
             ORDER BY
               CASE ${businessUnitCase}
                 WHEN 'Plantation' THEN 1
@@ -393,52 +394,53 @@ const getAllGR = async ({
         // ==========================================
         client.query(
           `
-            SELECT
-              c.id_company AS company_id,
-              c.company_name,
+    SELECT
+      c.id_company AS company_id,
+      c.company_name,
 
-              COUNT(DISTINCT gr.id_gr) AS total_transaction,
+      COUNT(DISTINCT gr.id_gr) AS total_transaction,
 
-              COALESCE(
-                SUM(
-                  (
-                    item.total_item - COALESCE(gr.discount, 0)
-                  )
-                  *
-                  CASE
-                    WHEN gr.ppn = 0.10 THEN 1.10
-                    WHEN gr.ppn = 0.11 THEN 1.11
-                    ELSE 1.0
-                  END
-                ),
-                0
-              ) AS grand_total
+      COALESCE(
+        SUM(
+          (
+            item.total_item - COALESCE(gr.discount, 0)
+          )
+          *
+          CASE
+            WHEN gr.ppn = 0.10 THEN 1.10
+            WHEN gr.ppn = 0.11 THEN 1.11
+            ELSE 1.0
+          END
+        ),
+        0
+      ) AS grand_total
 
-            FROM goods_receipt gr
+    FROM goods_receipt gr
 
-            JOIN purchase_order po
-              ON gr.id_po = po.id_po
+    JOIN purchase_order po
+      ON gr.id_po = po.id_po
 
-            JOIN mst_company c
-              ON po.id_company = c.id_company
+    JOIN mst_company c
+      ON po.id_company = c.id_company
 
-            JOIN (
-              SELECT
-                gri.id_gr,
-                SUM(gri.unit_price * gri.qty) AS total_item
-              FROM goods_receipt_item gri
-              GROUP BY gri.id_gr
-            ) item
-              ON gr.id_gr = item.id_gr
+    JOIN (
+      SELECT
+        gri.id_gr,
+        SUM(gri.unit_price * gri.qty) AS total_item
+      FROM goods_receipt_item gri
+      GROUP BY gri.id_gr
+    ) item
+      ON gr.id_gr = item.id_gr
 
-            ${whereClause}
+    ${whereClause}
+    ${whereClause ? "AND" : "WHERE"} gr.status = 'approved'
 
-            GROUP BY
-              c.id_company,
-              c.company_name
+    GROUP BY
+      c.id_company,
+      c.company_name
 
-            ORDER BY c.company_name
-          `,
+    ORDER BY c.company_name
+  `,
           values,
         ),
 
